@@ -1419,7 +1419,7 @@ impl Build {
             }
         }
 
-        let (lib_name, _gnu_lib_name) = if output.starts_with("lib") && output.ends_with(".a") {
+        let (_lib_name, _gnu_lib_name) = if output.starts_with("lib") && output.ends_with(".a") {
             (&output[3..output.len() - 2], output.to_owned())
         } else {
             let mut gnu = String::with_capacity(5 + output.len());
