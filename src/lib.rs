@@ -431,7 +431,7 @@ impl Build {
     /// This builder is finished with the [`compile`] function.
     ///
     /// [`compile`]: struct.Build.html#method.compile
-    pub fn new(file: Arc<Path>) -> Build {
+    pub fn new(file: impl AsRef<Path>) -> Build {
         Build {
             include_directories: Vec::new(),
             definitions: Vec::new(),
@@ -441,7 +441,7 @@ impl Build {
             ar_flags: Vec::new(),
             asm_flags: Vec::new(),
             no_default_flags: false,
-            file: file.into(),
+            file: Arc::from(file.as_ref()),
             shared_flag: None,
             static_flag: None,
             cpp: false,
