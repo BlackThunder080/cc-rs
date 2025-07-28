@@ -1456,24 +1456,6 @@ impl Build {
             }
         }
 
-        if self.link_lib_modifiers.is_empty() {
-            self.cargo_output
-                .print_metadata(&format_args!("cargo:rustc-link-lib=static={lib_name}"));
-        } else {
-            self.cargo_output.print_metadata(&format_args!(
-                "cargo:rustc-link-lib=static:{}={}",
-                JoinOsStrs {
-                    slice: &self.link_lib_modifiers,
-                    delimiter: ','
-                },
-                lib_name
-            ));
-        }
-        self.cargo_output.print_metadata(&format_args!(
-            "cargo:rustc-link-search=native={}",
-            dst.display()
-        ));
-
         // Add specific C++ libraries, if enabled.
         if self.cpp {
             if let Some(stdlib) = self.get_cpp_link_stdlib()? {
