@@ -311,7 +311,7 @@ pub struct Build {
     ar_flags: Vec<Arc<OsStr>>,
     asm_flags: Vec<Arc<OsStr>>,
     no_default_flags: bool,
-    files: Vec<Arc<Path>>,
+    file: Arc<Path>,
     cpp: bool,
     cpp_link_stdlib: Option<Option<Arc<str>>>,
     cpp_set_stdlib: Option<Arc<str>>,
@@ -431,7 +431,7 @@ impl Build {
     /// This builder is finished with the [`compile`] function.
     ///
     /// [`compile`]: struct.Build.html#method.compile
-    pub fn new() -> Build {
+    pub fn new(file: Arc<Path>) -> Build {
         Build {
             include_directories: Vec::new(),
             definitions: Vec::new(),
@@ -441,7 +441,7 @@ impl Build {
             ar_flags: Vec::new(),
             asm_flags: Vec::new(),
             no_default_flags: false,
-            files: Vec::new(),
+            file: file.into(),
             shared_flag: None,
             static_flag: None,
             cpp: false,
@@ -750,27 +750,9 @@ impl Build {
         self
     }
 
-    /// Add a file which will be compiled
-    pub fn file<P: AsRef<Path>>(&mut self, p: P) -> &mut Build {
-        self.files.push(p.as_ref().into());
-        self
-    }
-
-    /// Add files which will be compiled
-    pub fn files<P>(&mut self, p: P) -> &mut Build
-    where
-        P: IntoIterator,
-        P::Item: AsRef<Path>,
-    {
-        for file in p.into_iter() {
-            self.file(file);
-        }
-        self
-    }
-
     /// Get the files which will be compiled
     pub fn get_files(&self) -> impl Iterator<Item = &Path> {
-        self.files.iter().map(AsRef::as_ref)
+        self.file.iter().map(AsRef::as_ref)
     }
 
     /// Set C++ support.
@@ -1340,7 +1322,7 @@ impl Build {
         let obj = out_dir.join("flag_check");
 
         let mut compiler = {
-            let mut cfg = Build::new();
+            let mut cfg = Build::new(Arc::from(PathBuf::new()));
             cfg.flag(flag)
                 .compiler(tool.path())
                 .cargo_metadata(self.cargo_output.metadata)
@@ -1437,7 +1419,7 @@ impl Build {
             }
         }
 
-        let (lib_name, gnu_lib_name) = if output.starts_with("lib") && output.ends_with(".a") {
+        let (lib_name, _gnu_lib_name) = if output.starts_with("lib") && output.ends_with(".a") {
             (&output[3..output.len() - 2], output.to_owned())
         } else {
             let mut gnu = String::with_capacity(5 + output.len());
@@ -1448,10 +1430,9 @@ impl Build {
         };
         let dst = self.get_out_dir()?;
 
-        let objects = objects_from_files(&self.files, &dst)?;
+        let object = object_from_file(&self.file, &dst)?;
 
-        self.compile_objects(&objects)?;
-        self.assemble(lib_name, &dst.join(gnu_lib_name), &objects)?;
+        self.compile_object(&object)?;
 
         let target = self.get_target()?;
         if target.env == "msvc" {
@@ -1620,7 +1601,7 @@ impl Build {
     ///
     /// This will return a list of compiled object files, in the same order
     /// as they were passed in as `file`/`files` methods.
-    pub fn compile_intermediates(&self) -> Vec<PathBuf> {
+    pub fn compile_intermediates(&self) -> PathBuf {
         match self.try_compile_intermediates() {
             Ok(v) => v,
             Err(e) => fail(&e.message),
@@ -1631,17 +1612,17 @@ impl Build {
     /// them into an archive file.
     ///
     /// This will return a result instead of panicking; see `compile_intermediates()` for the complete description.
-    pub fn try_compile_intermediates(&self) -> Result<Vec<PathBuf>, Error> {
+    pub fn try_compile_intermediates(&self) -> Result<PathBuf, Error> {
         let dst = self.get_out_dir()?;
-        let objects = objects_from_files(&self.files, &dst)?;
+        let object = object_from_file(&self.file, &dst)?;
 
-        self.compile_objects(&objects)?;
+        self.compile_object(&object)?;
 
-        Ok(objects.into_iter().map(|v| v.dst).collect())
+        Ok(object.dst)
     }
 
     #[cfg(feature = "parallel")]
-    fn compile_objects(&self, objs: &[Object]) -> Result<(), Error> {
+    fn compile_object(&self, obj: &Object) -> Result<(), Error> {
         use std::cell::Cell;
 
         use parallel::async_executor::{block_on, YieldOnce};
@@ -1783,13 +1764,11 @@ impl Build {
     }
 
     #[cfg(not(feature = "parallel"))]
-    fn compile_objects(&self, objs: &[Object]) -> Result<(), Error> {
+    fn compile_object(&self, obj: &Object) -> Result<(), Error> {
         check_disabled()?;
 
-        for obj in objs {
-            let mut cmd = self.create_compile_object_cmd(obj)?;
-            run(&mut cmd, &self.cargo_output)?;
-        }
+        let mut cmd = self.create_compile_object_cmd(obj)?;
+        run(&mut cmd, &self.cargo_output)?;
 
         Ok(())
     }
@@ -1829,7 +1808,7 @@ impl Build {
         if !is_assembler_msvc || !is_arm {
             cmd.arg("-c");
         }
-        if self.cuda && self.cuda_file_count() > 1 {
+        if self.cuda && self.is_cuda() {
             cmd.arg("--device-c");
         }
         if is_asm {
@@ -1862,17 +1841,7 @@ impl Build {
         }
         cmd.arg("-E");
 
-        assert!(
-            self.files.len() <= 1,
-            "Expand may only be called for a single file"
-        );
-
-        let is_asm = self
-            .files
-            .iter()
-            .map(std::ops::Deref::deref)
-            .find_map(AsmFileExt::from_path)
-            .is_some();
+        let is_asm = AsmFileExt::from_path(&self.file).is_some();
 
         if compiler.family == (ToolFamily::Msvc { clang_cl: true }) && !is_asm {
             // #513: For `clang-cl`, separate flags/options from the input file.
@@ -1882,7 +1851,7 @@ impl Build {
             cmd.arg("--");
         }
 
-        cmd.args(self.files.iter().map(std::ops::Deref::deref));
+        cmd.args(&*self.file);
 
         run_output(&mut cmd, &self.cargo_output)
     }
@@ -2614,126 +2583,6 @@ impl Build {
         }
 
         Ok(cmd)
-    }
-
-    fn assemble(&self, lib_name: &str, dst: &Path, objs: &[Object]) -> Result<(), Error> {
-        // Delete the destination if it exists as we want to
-        // create on the first iteration instead of appending.
-        let _ = fs::remove_file(dst);
-
-        // Add objects to the archive in limited-length batches. This helps keep
-        // the length of the command line within a reasonable length to avoid
-        // blowing system limits on limiting platforms like Windows.
-        let objs: Vec<_> = objs
-            .iter()
-            .map(|o| o.dst.as_path())
-            .chain(self.objects.iter().map(std::ops::Deref::deref))
-            .collect();
-        for chunk in objs.chunks(100) {
-            self.assemble_progressive(dst, chunk)?;
-        }
-
-        if self.cuda && self.cuda_file_count() > 0 {
-            // Link the device-side code and add it to the target library,
-            // so that non-CUDA linker can link the final binary.
-
-            let out_dir = self.get_out_dir()?;
-            let dlink = out_dir.join(lib_name.to_owned() + "_dlink.o");
-            let mut nvcc = self.get_compiler().to_command();
-            nvcc.arg("--device-link").arg("-o").arg(&dlink).arg(dst);
-            run(&mut nvcc, &self.cargo_output)?;
-            self.assemble_progressive(dst, &[dlink.as_path()])?;
-        }
-
-        let target = self.get_target()?;
-        if target.env == "msvc" {
-            // The Rust compiler will look for libfoo.a and foo.lib, but the
-            // MSVC linker will also be passed foo.lib, so be sure that both
-            // exist for now.
-
-            let lib_dst = dst.with_file_name(format!("{lib_name}.lib"));
-            let _ = fs::remove_file(&lib_dst);
-            match fs::hard_link(dst, &lib_dst).or_else(|_| {
-                // if hard-link fails, just copy (ignoring the number of bytes written)
-                fs::copy(dst, &lib_dst).map(|_| ())
-            }) {
-                Ok(_) => (),
-                Err(_) => {
-                    return Err(Error::new(
-                        ErrorKind::IOError,
-                        "Could not copy or create a hard-link to the generated lib file.",
-                    ));
-                }
-            };
-        } else {
-            // Non-msvc targets (those using `ar`) need a separate step to add
-            // the symbol table to archives since our construction command of
-            // `cq` doesn't add it for us.
-            let mut ar = self.try_get_archiver()?;
-
-            // NOTE: We add `s` even if flags were passed using $ARFLAGS/ar_flag, because `s`
-            // here represents a _mode_, not an arbitrary flag. Further discussion of this choice
-            // can be seen in https://github.com/rust-lang/cc-rs/pull/763.
-            run(ar.arg("s").arg(dst), &self.cargo_output)?;
-        }
-
-        Ok(())
-    }
-
-    fn assemble_progressive(&self, dst: &Path, objs: &[&Path]) -> Result<(), Error> {
-        let target = self.get_target()?;
-
-        let (mut cmd, program, any_flags) = self.try_get_archiver_and_flags()?;
-        if target.env == "msvc" && !program.to_string_lossy().contains("llvm-ar") {
-            // NOTE: -out: here is an I/O flag, and so must be included even if $ARFLAGS/ar_flag is
-            // in use. -nologo on the other hand is just a regular flag, and one that we'll skip if
-            // the caller has explicitly dictated the flags they want. See
-            // https://github.com/rust-lang/cc-rs/pull/763 for further discussion.
-            let mut out = OsString::from("-out:");
-            out.push(dst);
-            cmd.arg(out);
-            if !any_flags {
-                cmd.arg("-nologo");
-            }
-            // If the library file already exists, add the library name
-            // as an argument to let lib.exe know we are appending the objs.
-            if dst.exists() {
-                cmd.arg(dst);
-            }
-            cmd.args(objs);
-            run(&mut cmd, &self.cargo_output)?;
-        } else {
-            // Set an environment variable to tell the OSX archiver to ensure
-            // that all dates listed in the archive are zero, improving
-            // determinism of builds. AFAIK there's not really official
-            // documentation of this but there's a lot of references to it if
-            // you search google.
-            //
-            // You can reproduce this locally on a mac with:
-            //
-            //      $ touch foo.c
-            //      $ cc -c foo.c -o foo.o
-            //
-            //      # Notice that these two checksums are different
-            //      $ ar crus libfoo1.a foo.o && sleep 2 && ar crus libfoo2.a foo.o
-            //      $ md5sum libfoo*.a
-            //
-            //      # Notice that these two checksums are the same
-            //      $ export ZERO_AR_DATE=1
-            //      $ ar crus libfoo1.a foo.o && sleep 2 && touch foo.o && ar crus libfoo2.a foo.o
-            //      $ md5sum libfoo*.a
-            //
-            // In any case if this doesn't end up getting read, it shouldn't
-            // cause that many issues!
-            cmd.env("ZERO_AR_DATE", "1");
-
-            // NOTE: We add cq here regardless of whether $ARFLAGS/ar_flag have been used because
-            // it dictates the _mode_ ar runs in, which the setter of $ARFLAGS/ar_flag can't
-            // dictate. See https://github.com/rust-lang/cc-rs/pull/763 for further discussion.
-            run(cmd.arg("cq").arg(dst).args(objs), &self.cargo_output)?;
-        }
-
-        Ok(())
     }
 
     fn apple_flags(&self, cmd: &mut Tool) -> Result<(), Error> {
@@ -4087,11 +3936,8 @@ impl Build {
         }
     }
 
-    fn cuda_file_count(&self) -> usize {
-        self.files
-            .iter()
-            .filter(|file| file.extension() == Some(OsStr::new("cu")))
-            .count()
+    fn is_cuda(&self) -> bool {
+        self.file.extension() == Some(OsStr::new("cu"))
     }
 
     fn which(&self, tool: &Path, path_entries: Option<&OsStr>) -> Option<PathBuf> {
@@ -4160,12 +4006,6 @@ impl Build {
         }
 
         windows_registry::find_tool_inner(target.full_arch, tool, &BuildEnvGetter(self))
-    }
-}
-
-impl Default for Build {
-    fn default() -> Build {
-        Build::new()
     }
 }
 
